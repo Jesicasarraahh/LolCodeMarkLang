@@ -3,9 +3,6 @@ use std::env;
 use std::fs;
 use std::process;
 
-//
-// ==================== Compiler Trait ====================
-//
 pub trait Compiler {
     fn compile(&mut self, source: &str);
     fn next_token(&mut self) -> String;
@@ -14,34 +11,15 @@ pub trait Compiler {
     fn set_current_token(&mut self, tok: String);
 }
 
-//
-// ================= Lexical Analyzer Trait =================
-//
-pub trait LexicalAnalyzer {
-    fn get_char(&mut self) -> char;
-    fn add_char(&mut self, c: char);
-    fn lookup(&self, s: &str) -> bool;
-}
-
-//
-// ============ Concrete Lexical Analyzer ===================
-//
 pub struct SimpleLexicalAnalyzer {
-    input: Vec<char>,
-    position: usize,
-    current_build: String,
     pub tokens: Vec<String>,
     pub known_tags: Vec<String>,
 }
 
 impl SimpleLexicalAnalyzer {
-    pub fn new(source: &str) -> Self {
+    pub fn new(_source: &str) -> Self {
         Self {
-            input: source.chars().collect(),
-            position: 0,
-            current_build: String::new(),
             tokens: Vec::new(),
-            // longest tags first helps matching
             known_tags: vec![
                 "#GIMMEH ITALICS".to_string(),
                 "#GIMMEH TITLE".to_string(),
@@ -65,96 +43,154 @@ impl SimpleLexicalAnalyzer {
         }
     }
 
-    fn peek_char(&self) -> char {
-        if self.position < self.input.len() {
-            self.input[self.position]
-        } else {
-            '\0'
-        }
+    fn starts_with_ignore_case(s: &str, pat: &str) -> bool {
+        s.len() >= pat.len() && s[..pat.len()].eq_ignore_ascii_case(pat)
     }
 
-    fn matches_tag_ignore_case(&self, tag: &str) -> bool {
-        let tag_chars: Vec<char> = tag.chars().collect();
-
-        if self.position + tag_chars.len() > self.input.len() {
-            return false;
-        }
-
-        for (i, tag_ch) in tag_chars.iter().enumerate() {
-            let source_ch = self.input[self.position + i];
-            if !source_ch.eq_ignore_ascii_case(tag_ch) {
-                return false;
-            }
-        }
-
-        true
+    fn find_ignore_case(s: &str, pat: &str) -> Option<usize> {
+        let lower_s = s.to_ascii_lowercase();
+        let lower_pat = pat.to_ascii_lowercase();
+        lower_s.find(&lower_pat)
     }
 
-    fn flush_text(&mut self) {
-        let text = self.current_build.trim().to_string();
-        if !text.is_empty() {
-            self.tokens.push(format!("TEXT:{}", text));
-        }
-        self.current_build.clear();
-    }
-
-    fn read_tag(&mut self) -> Result<(), String> {
+    fn match_known_tag<'a>(&self, s: &'a str) -> Option<(String, &'a str)> {
         for tag in &self.known_tags {
-            if self.matches_tag_ignore_case(tag) {
-                self.position += tag.chars().count();
-                self.tokens.push(tag.clone());
-                return Ok(());
+            if Self::starts_with_ignore_case(s, tag) {
+                let rest = &s[tag.len()..];
+                return Some((tag.clone(), rest));
             }
         }
-
-        Err(format!(
-            "Lexical error at character {}: unknown annotation starting with '#'",
-            self.position + 1
-        ))
+        None
     }
 
-    pub fn tokenize(&mut self) -> Result<(), String> {
-        while self.peek_char() != '\0' {
-            let c = self.peek_char();
+    fn push_text_if_any(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            self.tokens.push(format!("TEXT:{}", trimmed));
+        }
+    }
 
-            if c == '#' {
-                self.flush_text();
-                self.read_tag()?;
-            } else {
-                let ch = self.get_char();
+    fn tokenize_regular_line(&mut self, line: &str) -> Result<(), String> {
+        let mut rest = line;
 
-                // professor said these can be assumed not to appear
-                if ch == '<' || ch == '>' || ch == '&' {
+        while !rest.is_empty() {
+            if rest.starts_with('#') {
+                if let Some((tag, new_rest)) = self.match_known_tag(rest) {
+                    self.tokens.push(tag);
+                    rest = new_rest.trim_start();
+                } else {
                     return Err(format!(
-                        "Lexical error at character {}: invalid character '{}'",
-                        self.position,
-                        ch
+                        "Lexical error: unknown annotation starting with '{}'",
+                        rest
                     ));
                 }
-
-                self.add_char(ch);
+            } else {
+                let next_tag = rest.find('#').unwrap_or(rest.len());
+                let text = &rest[..next_tag];
+                self.push_text_if_any(text);
+                rest = rest[next_tag..].trim_start();
             }
         }
 
-        self.flush_text();
-        self.tokens.reverse(); // so pop() reads in original order
         Ok(())
     }
-}
 
-impl LexicalAnalyzer for SimpleLexicalAnalyzer {
-    fn get_char(&mut self) -> char {
-        if self.position < self.input.len() {
-            let c = self.input[self.position];
-            self.position += 1;
-            c
-        } else {
-            '\0'
+    pub fn tokenize(&mut self, source: &str) -> Result<(), String> {
+        self.tokens.clear();
+
+        let lines: Vec<&str> = source.lines().collect();
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i].trim();
+
+            if line.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            if line.contains('<') || line.contains('>') || line.contains('&') {
+                return Err(format!(
+                    "Lexical error: invalid character found in line '{}'",
+                    line
+                ));
+            }
+
+            if Self::starts_with_ignore_case(line, "#OBTW") {
+                self.tokens.push("#OBTW".to_string());
+
+                let rest = line[5..].trim();
+
+                if let Some(pos) = Self::find_ignore_case(rest, "#TLDR") {
+                    let comment_body = rest[..pos].trim();
+                    let after_tldr = rest[pos + 5..].trim();
+
+                    if !comment_body.is_empty() {
+                        self.tokens.push(format!("TEXT:{}", comment_body));
+                    }
+
+                    self.tokens.push("#TLDR".to_string());
+
+                    if !after_tldr.is_empty() {
+                        self.tokenize_regular_line(after_tldr)?;
+                    }
+                } else {
+                    let mut comment_parts: Vec<String> = Vec::new();
+
+                    if !rest.is_empty() {
+                        comment_parts.push(rest.to_string());
+                    }
+
+                    let mut found_tldr = false;
+                    i += 1;
+
+                    while i < lines.len() {
+                        let next_line = lines[i].trim();
+
+                        if let Some(pos) = Self::find_ignore_case(next_line, "#TLDR") {
+                            let before_tldr = next_line[..pos].trim();
+                            let after_tldr = next_line[pos + 5..].trim();
+
+                            if !before_tldr.is_empty() {
+                                comment_parts.push(before_tldr.to_string());
+                            }
+
+                            let comment_body = comment_parts.join(" ");
+                            if !comment_body.trim().is_empty() {
+                                self.tokens.push(format!("TEXT:{}", comment_body.trim()));
+                            }
+
+                            self.tokens.push("#TLDR".to_string());
+
+                            if !after_tldr.is_empty() {
+                                self.tokenize_regular_line(after_tldr)?;
+                            }
+
+                            found_tldr = true;
+                            break;
+                        } else if !next_line.is_empty() {
+                            comment_parts.push(next_line.to_string());
+                        }
+
+                        i += 1;
+                    }
+
+                    if !found_tldr {
+                        return Err(
+                            "Syntax error: comment started with #OBTW but missing #TLDR."
+                                .to_string(),
+                        );
+                    }
+                }
+            } else {
+                self.tokenize_regular_line(line)?;
+            }
+
+            i += 1;
         }
-    }
 
-    fn add_char(&mut self, c: char) {
-        self.current_build.push(c);
+        self.tokens.reverse();
+        Ok(())
     }
 
     fn lookup(&self, s: &str) -> bool {
@@ -162,13 +198,10 @@ impl LexicalAnalyzer for SimpleLexicalAnalyzer {
     }
 }
 
-//
-// ==================== LOLCODE Compiler ====================
-//
 pub struct LolcodeCompiler {
     lexer: SimpleLexicalAnalyzer,
     current_tok: String,
-    variables: HashMap<String, String>,
+    scopes: Vec<HashMap<String, String>>,
     pub output: String,
 }
 
@@ -177,20 +210,18 @@ impl LolcodeCompiler {
         Self {
             lexer: SimpleLexicalAnalyzer::new(""),
             current_tok: String::new(),
-            variables: HashMap::new(),
+            scopes: vec![HashMap::new()],
             output: String::new(),
         }
     }
 
     fn start(&mut self) {
         let candidate = self.next_token();
-
-        if !candidate.is_empty() {
-            self.current_tok = candidate;
-        } else {
+        if candidate.is_empty() {
             eprintln!("User error: the provided file is empty.");
             process::exit(1);
         }
+        self.current_tok = candidate;
     }
 
     fn expect(&mut self, expected: &str) {
@@ -210,29 +241,56 @@ impl LolcodeCompiler {
     }
 
     fn text_value(&self) -> String {
-        if self.current_tok.starts_with("TEXT:") {
+        if self.is_text_token() {
             self.current_tok[5..].trim().to_string()
         } else {
             String::new()
         }
     }
 
-    fn emit_text(&mut self, s: &str) {
+    fn emit_raw(&mut self, s: &str) {
         self.output.push_str(s);
     }
 
-    fn emit_text_with_space(&mut self, s: &str) {
-        self.output.push_str(s);
-        self.output.push(' ');
+    fn emit_piece(&mut self, s: &str) {
+        if !s.is_empty() {
+            self.output.push_str(s);
+            self.output.push(' ');
+        }
+    }
+
+    fn enter_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn exit_scope(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    fn define_variable(&mut self, name: String, value: String) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, value);
+        }
+    }
+
+    fn lookup_variable(&self, name: &str) -> Option<String> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(value) = scope.get(name) {
+                return Some(value.clone());
+            }
+        }
+        None
     }
 
     fn text(&mut self) {
         if self.is_text_token() {
-            let val = self.text_value();
-            self.emit_text_with_space(&val);
+            let value = self.text_value();
+            self.emit_piece(&value);
             self.next_token();
         } else {
-            eprintln!("Syntax error: expected TEXT, but found '{}'.", self.current_tok);
+            eprintln!("Syntax error: expected text, but found '{}'.", self.current_tok);
             process::exit(1);
         }
     }
@@ -243,7 +301,7 @@ impl LolcodeCompiler {
             process::exit(1);
         }
 
-        self.emit_text("<html>\n");
+        self.emit_raw("<html>\n");
         self.expect("#HAI");
         self.body();
 
@@ -262,7 +320,7 @@ impl LolcodeCompiler {
             process::exit(1);
         }
 
-        self.emit_text("</html>\n");
+        self.emit_raw("</html>\n");
     }
 
     fn body(&mut self) {
@@ -283,7 +341,7 @@ impl LolcodeCompiler {
         } else if self.current_tok.eq_ignore_ascii_case("#GIMMEH ITALICS") {
             self.italics();
         } else if self.current_tok.eq_ignore_ascii_case("#MAEK LIST") {
-            self.list();
+            self.list_block();
         } else if self.current_tok.eq_ignore_ascii_case("#NEWLINE") {
             self.newline_tag();
         } else if self.current_tok.eq_ignore_ascii_case("#GIMMEH LINX") {
@@ -303,25 +361,24 @@ impl LolcodeCompiler {
     fn comment(&mut self) {
         self.expect("#OBTW");
 
-        if !self.is_text_token() {
-            eprintln!("Syntax error: expected comment text, found '{}'.", self.current_tok);
-            process::exit(1);
+        let mut comment_text = String::new();
+        if self.is_text_token() {
+            comment_text = self.text_value();
+            self.next_token();
         }
 
-        let comment_text = self.text_value();
-        self.emit_text("<!-- ");
-        self.emit_text(&comment_text);
-        self.emit_text(" -->\n");
-
-        self.next_token();
         self.expect("#TLDR");
+
+        self.emit_raw("<!-- ");
+        self.emit_raw(&comment_text);
+        self.emit_raw(" -->\n");
     }
 
     fn head(&mut self) {
         self.expect("#MAEK HEAD");
-        self.emit_text("<head>\n");
+        self.emit_raw("<head>\n");
         self.title();
-        self.emit_text("</head>\n");
+        self.emit_raw("</head>\n");
         self.expect("#MKAY");
     }
 
@@ -329,14 +386,14 @@ impl LolcodeCompiler {
         self.expect("#GIMMEH TITLE");
 
         if !self.is_text_token() {
-            eprintln!("Syntax error: expected title text, found '{}'.", self.current_tok);
+            eprintln!("Syntax error: expected title text, but found '{}'.", self.current_tok);
             process::exit(1);
         }
 
         let title_text = self.text_value();
-        self.emit_text("<title>");
-        self.emit_text(&title_text);
-        self.emit_text("</title>\n");
+        self.emit_raw("<title>");
+        self.emit_raw(&title_text);
+        self.emit_raw("</title>\n");
 
         self.next_token();
         self.expect("#OIC");
@@ -344,24 +401,21 @@ impl LolcodeCompiler {
 
     fn paragraph(&mut self) {
         self.expect("#MAEK PARAGRAF");
-        self.emit_text("<p>");
-        self.paragraph_body();
-        self.emit_text("</p>\n");
-        self.expect("#MKAY");
-    }
+        self.enter_scope();
+        self.emit_raw("<p>");
 
-    fn paragraph_body(&mut self) {
-        if self.current_tok.eq_ignore_ascii_case("#IHAZ") {
-            self.variable_definition();
+        if self.current_tok.eq_ignore_ascii_case("#MKAY") {
+            eprintln!("Syntax error: empty paragraph is not allowed.");
+            process::exit(1);
         }
 
-        self.paragraph_content();
-    }
-
-    fn paragraph_content(&mut self) {
         while !self.current_tok.is_empty() && !self.current_tok.eq_ignore_ascii_case("#MKAY") {
             self.paragraph_item();
         }
+
+        self.expect("#MKAY");
+        self.emit_raw("</p>\n");
+        self.exit_scope();
     }
 
     fn paragraph_item(&mut self) {
@@ -372,11 +426,13 @@ impl LolcodeCompiler {
         } else if self.current_tok.eq_ignore_ascii_case("#GIMMEH ITALICS") {
             self.italics();
         } else if self.current_tok.eq_ignore_ascii_case("#MAEK LIST") {
-            self.list();
+            self.list_block();
         } else if self.current_tok.eq_ignore_ascii_case("#NEWLINE") {
             self.newline_tag();
         } else if self.current_tok.eq_ignore_ascii_case("#GIMMEH LINX") {
             self.link();
+        } else if self.current_tok.eq_ignore_ascii_case("#IHAZ") {
+            self.variable_definition();
         } else if self.current_tok.eq_ignore_ascii_case("#LEMMESEE") {
             self.variable_usage();
         } else {
@@ -389,14 +445,12 @@ impl LolcodeCompiler {
         self.expect("#GIMMEH BOLD");
 
         if !self.is_text_token() {
-            eprintln!("Syntax error: expected bold text, found '{}'.", self.current_tok);
+            eprintln!("Syntax error: expected bold text, but found '{}'.", self.current_tok);
             process::exit(1);
         }
 
-        let bold_text = self.text_value();
-        self.emit_text("<b>");
-        self.emit_text(&bold_text);
-        self.emit_text("</b>");
+        let text = self.text_value();
+        self.emit_piece(&format!("<b>{}</b>", text));
 
         self.next_token();
         self.expect("#OIC");
@@ -406,28 +460,21 @@ impl LolcodeCompiler {
         self.expect("#GIMMEH ITALICS");
 
         if !self.is_text_token() {
-            eprintln!("Syntax error: expected italics text, found '{}'.", self.current_tok);
+            eprintln!("Syntax error: expected italics text, but found '{}'.", self.current_tok);
             process::exit(1);
         }
 
-        let italics_text = self.text_value();
-        self.emit_text("<i>");
-        self.emit_text(&italics_text);
-        self.emit_text("</i>");
+        let text = self.text_value();
+        self.emit_piece(&format!("<i>{}</i>", text));
 
         self.next_token();
         self.expect("#OIC");
     }
 
-    fn list(&mut self) {
+    fn list_block(&mut self) {
         self.expect("#MAEK LIST");
-        self.emit_text("<ul>\n");
-        self.item_list();
-        self.emit_text("</ul>\n");
-        self.expect("#MKAY");
-    }
+        self.emit_raw("<ul>\n");
 
-    fn item_list(&mut self) {
         if !self.current_tok.eq_ignore_ascii_case("#GIMMEH ITEM") {
             eprintln!("Syntax error: list must contain at least one #GIMMEH ITEM.");
             process::exit(1);
@@ -436,25 +483,26 @@ impl LolcodeCompiler {
         while self.current_tok.eq_ignore_ascii_case("#GIMMEH ITEM") {
             self.item();
         }
+
+        self.expect("#MKAY");
+        self.emit_raw("</ul>\n");
     }
 
     fn item(&mut self) {
         self.expect("#GIMMEH ITEM");
-        self.emit_text("<li>");
-        self.item_content();
-        self.emit_text("</li>\n");
-        self.expect("#OIC");
-    }
+        self.emit_raw("<li>");
 
-    fn item_content(&mut self) {
         if self.current_tok.eq_ignore_ascii_case("#OIC") {
-            eprintln!("Syntax error: list item cannot be empty.");
+            eprintln!("Syntax error: empty list item is not allowed.");
             process::exit(1);
         }
 
         while !self.current_tok.is_empty() && !self.current_tok.eq_ignore_ascii_case("#OIC") {
             self.item_piece();
         }
+
+        self.expect("#OIC");
+        self.emit_raw("</li>\n");
     }
 
     fn item_piece(&mut self) {
@@ -474,7 +522,7 @@ impl LolcodeCompiler {
 
     fn newline_tag(&mut self) {
         self.expect("#NEWLINE");
-        self.emit_text("<br>\n");
+        self.emit_raw("<br>\n");
     }
 
     fn link(&mut self) {
@@ -482,14 +530,14 @@ impl LolcodeCompiler {
 
         if !self.is_text_token() {
             eprintln!(
-                "Syntax error: expected address text after #GIMMEH LINX, found '{}'.",
+                "Syntax error: expected address text after #GIMMEH LINX, but found '{}'.",
                 self.current_tok
             );
             process::exit(1);
         }
 
         let address = self.text_value();
-        self.emit_text(&format!("<a href=\"{0}\">{0}</a>", address));
+        self.emit_piece(&format!("<a href=\"{0}\">{0}</a>", address));
 
         self.next_token();
         self.expect("#OIC");
@@ -500,7 +548,7 @@ impl LolcodeCompiler {
 
         if !self.is_text_token() {
             eprintln!(
-                "Semantic/Syntax error: expected variable name after #IHAZ, found '{}'.",
+                "Syntax error: expected variable name after #IHAZ, but found '{}'.",
                 self.current_tok
             );
             process::exit(1);
@@ -513,7 +561,7 @@ impl LolcodeCompiler {
 
         if !self.is_text_token() {
             eprintln!(
-                "Semantic/Syntax error: expected variable value after #ITIZ, found '{}'.",
+                "Syntax error: expected variable value after #ITIZ, but found '{}'.",
                 self.current_tok
             );
             process::exit(1);
@@ -522,8 +570,7 @@ impl LolcodeCompiler {
         let var_value = self.text_value();
         self.next_token();
 
-        self.variables.insert(var_name, var_value);
-
+        self.define_variable(var_name, var_value);
         self.expect("#MKAY");
     }
 
@@ -532,7 +579,7 @@ impl LolcodeCompiler {
 
         if !self.is_text_token() {
             eprintln!(
-                "Semantic/Syntax error: expected variable name after #LEMMESEE, found '{}'.",
+                "Syntax error: expected variable name after #LEMMESEE, but found '{}'.",
                 self.current_tok
             );
             process::exit(1);
@@ -540,7 +587,9 @@ impl LolcodeCompiler {
 
         let var_name = self.text_value();
 
-        if !self.variables.contains_key(&var_name) {
+        if let Some(value) = self.lookup_variable(&var_name) {
+            self.emit_piece(&value);
+        } else {
             eprintln!(
                 "Static semantic error: variable '{}' was used before it was defined.",
                 var_name
@@ -548,11 +597,26 @@ impl LolcodeCompiler {
             process::exit(1);
         }
 
-        let value = self.variables.get(&var_name).unwrap().clone();
-        self.emit_text_with_space(&value);
-
         self.next_token();
         self.expect("#OIC");
+    }
+
+    fn cleanup_output(&mut self) {
+        let cleaned = self
+            .output
+            .replace(" .", ".")
+            .replace(" ,", ",")
+            .replace(" !", "!")
+            .replace(" ?", "?")
+            .replace(" :", ":")
+            .replace(" ;", ";")
+            .replace(" </p>", "</p>")
+            .replace(" </li>", "</li>")
+            .replace("> </", "></")
+            .replace("<p> ", "<p>")
+            .replace("<li> ", "<li>");
+
+        self.output = cleaned;
     }
 }
 
@@ -560,7 +624,7 @@ impl Compiler for LolcodeCompiler {
     fn compile(&mut self, source: &str) {
         self.lexer = SimpleLexicalAnalyzer::new(source);
 
-        if let Err(err) = self.lexer.tokenize() {
+        if let Err(err) = self.lexer.tokenize(source) {
             eprintln!("{}", err);
             process::exit(1);
         }
@@ -571,12 +635,12 @@ impl Compiler for LolcodeCompiler {
     fn next_token(&mut self) -> String {
         let candidate = self.lexer.tokens.pop().unwrap_or_default();
 
-        if self.lexer.lookup(&candidate) {
-            self.current_tok = candidate.clone();
-            candidate
-        } else if self.lexer.tokens.is_empty() && candidate.is_empty() {
+        if candidate.is_empty() {
             self.current_tok.clear();
             String::new()
+        } else if self.lexer.lookup(&candidate) {
+            self.current_tok = candidate.clone();
+            candidate
         } else {
             eprintln!("Lexical error: '{}' is not a recognized token.", candidate);
             process::exit(1);
@@ -585,10 +649,8 @@ impl Compiler for LolcodeCompiler {
 
     fn parse(&mut self) {
         self.program();
+        self.cleanup_output();
         println!("Syntax analysis completed successfully.");
-
-        let cleaned = self.output.replace(" </p>", "</p>");
-        self.output = cleaned;
     }
 
     fn current_token(&self) -> String {
@@ -624,7 +686,8 @@ fn main() {
     compiler.compile(&source);
     compiler.parse();
 
-    let output_filename = filename.replace(".lol", ".html");
+    let base = &filename[..filename.len() - 4];
+    let output_filename = format!("{}.html", base);
 
     fs::write(&output_filename, &compiler.output).unwrap_or_else(|err| {
         eprintln!("Error writing HTML file '{}': {}", output_filename, err);

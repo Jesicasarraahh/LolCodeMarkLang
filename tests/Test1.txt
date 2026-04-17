@@ -1,0 +1,4 @@
+#HAI
+#OBTW This test case assess that your compiler only accepts lol code files. #TLDR
+this is test case 1.
+#KBYE

@@ -1,0 +1,11 @@
+#Building folder in Rust
+target/
+#Compiled files
+*.exe
+#Generated HTML output
+*.html 
+# OS files
+.DS_Store
+Thumbs.db
+#vs code settings
+.vscode/
